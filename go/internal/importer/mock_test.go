@@ -34,6 +34,7 @@ type mockVulnerabilityStore struct {
 
 	Entries map[string][]*models.VulnSourceRef
 	RawMods map[string]time.Time
+	Writes  []models.WriteRequest
 }
 
 func (m *mockVulnerabilityStore) ListBySource(_ context.Context, source string, _ bool) iter.Seq2[*models.VulnSourceRef, error] {
@@ -53,6 +54,12 @@ func (m *mockVulnerabilityStore) GetSourceModified(_ context.Context, vuln strin
 	}
 
 	return time.Time{}, models.ErrNotFound
+}
+
+func (m *mockVulnerabilityStore) Write(_ context.Context, req models.WriteRequest) error {
+	m.Writes = append(m.Writes, req)
+
+	return nil
 }
 
 type mockSourceRecord struct {

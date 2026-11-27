@@ -4,9 +4,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -17,6 +20,7 @@ import (
 	db "github.com/google/osv.dev/go/internal/database/datastore"
 	"github.com/google/osv.dev/go/internal/gitter"
 	"github.com/google/osv.dev/go/internal/importer"
+	"github.com/google/osv.dev/go/internal/urgent"
 	"github.com/google/osv.dev/go/logger"
 	"github.com/google/osv.dev/go/osv/clients"
 	"github.com/hashicorp/go-retryablehttp"
@@ -37,6 +41,9 @@ func main() {
 		"Note: this only applies to SourceRepositories with strict_validation=true")
 	runDelete := flag.Bool("delete", false, "Bypass importing and propagate record deletions from source to Datastore")
 	runReconcile := flag.Bool("reconcile", false, "Analyze sources and trigger an import if the source modified date is newer than the database record")
+	urgentFile := flag.String("urgent-file", "", "Submit one urgent OSV JSON file directly to the database (use '-' for stdin)")
+	urgentSource := flag.String("urgent-source", "urgent", "SourceRepository name to associate with -urgent-file")
+	urgentPath := flag.String("urgent-path", "", "Source path to record for -urgent-file (defaults to the file name)")
 	deleteThresholdPct := flag.Float64("delete-threshold-pct", 10.0, "More than this percent of records for a given source being deleted triggers an error")
 	numWorkers := flag.Int("num-workers", 50, "Number of workers to use for importing")
 	maxCowardEntriesToShow := flag.Int("max-coward-entries-to-show", 250, "Maximum number of entries to show when cowardly refusing to delete missing records")
@@ -79,7 +86,7 @@ func main() {
 	httpClient.Logger = importer.RetryableHTTPLeveledLogger{}
 	config.HTTPClient = httpClient.StandardClient()
 
-	if !*runDelete {
+	if !*runDelete && *urgentFile == "" {
 		gitterHost := os.Getenv("GITTER_HOST")
 		if gitterHost == "" {
 			logger.FatalContext(ctx, "GITTER_HOST environment variable is not set")
@@ -109,10 +116,6 @@ func main() {
 	}
 	config.SourceRepoStore = db.NewSourceRepositoryStore(datastoreClient)
 	config.JobDataStore = db.NewJobDataStore(datastoreClient)
-	// Needed for deletions only
-	config.VulnerabilityStore = db.NewVulnerabilityStore(db.VulnStoreConfig{
-		Client: datastoreClient,
-	})
 
 	psClient, err := pubsub.NewClient(ctx, project)
 	if err != nil {
@@ -126,8 +129,21 @@ func main() {
 		logger.FatalContext(ctx, "Failed to create GCS client", slog.Any("error", err))
 	}
 	config.GCSProvider = clients.NewGCSStorageProvider(storageClient)
+	vulnBucket := os.Getenv("OSV_VULNERABILITIES_BUCKET")
+	if vulnBucket == "" {
+		logger.FatalContext(ctx, "OSV_VULNERABILITIES_BUCKET environment variable is not set")
+	}
+	config.VulnerabilityStore = db.NewVulnerabilityStore(db.VulnStoreConfig{
+		Client: datastoreClient,
+		GCS:    clients.NewGCSClient(storageClient, vulnBucket),
+	})
+	config.UrgentProcessor = urgent.NewProcessor(config.VulnerabilityStore, config.SourceRepoStore)
 
-	if *runDelete {
+	if *urgentFile != "" {
+		if err := ingestUrgentFile(ctx, config.UrgentProcessor, *urgentFile, *urgentSource, *urgentPath); err != nil {
+			logger.FatalContext(ctx, "Urgent ingestion failed", slog.Any("error", err))
+		}
+	} else if *runDelete {
 		if err := importer.RunDeletions(ctx, config); err != nil {
 			logger.FatalContext(ctx, "Importer-deleter failed", slog.Any("error", err))
 		}
@@ -143,6 +159,38 @@ func main() {
 		}
 		logger.InfoContext(ctx, "Importer completed successfully")
 	}
+}
+
+func ingestUrgentFile(ctx context.Context, processor *urgent.Processor, filePath, source, sourcePath string) error {
+	var data []byte
+	var err error
+	if filePath == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(filePath)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read urgent vulnerability: %w", err)
+	}
+	if sourcePath == "" {
+		sourcePath = filepath.Base(filePath)
+		if filePath == "-" {
+			sourcePath = "stdin.json"
+		}
+	}
+
+	start := time.Now()
+	result, err := processor.IngestJSON(ctx, source, sourcePath, data, start)
+	if err != nil {
+		return err
+	}
+	if !result.WithinThreshold {
+		return fmt.Errorf("urgent vulnerability %s was stored but exceeded the %s latency threshold (took %s)",
+			result.Vulnerability.GetId(), processor.LatencyThreshold, result.Duration)
+	}
+	fmt.Printf("stored %s in %s\n", result.Vulnerability.GetId(), result.Duration)
+
+	return nil
 }
 
 // importerSampleRate returns the sample rate for the high-level importer orchestration.

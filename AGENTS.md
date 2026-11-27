@@ -296,6 +296,7 @@ All Go microservices are compiled using a single, unified multi-target Dockerfil
    - Reads from each vulnerability data source (defined as `SourceRepository` in Datastore or mapped in [`source.yaml`](source.yaml) / [`source_test.yaml`](source_test.yaml)).
    - Detects new or deleted vulnerability records.
    - Dispatches processing tasks via **GCP Pub/Sub** to the worker.
+   - Supports an urgent fast lane for records marked with `database_specific.urgent=true`: strict schema/batch validation is skipped and the record is written synchronously via [`go/internal/urgent/`](go/internal/urgent/). Operators can also submit a single file immediately with `-urgent-file` without waiting for the normal cron scan.
 
 6. **`worker`**:
    - Daemon that subscribes to Pub/Sub tasks.
@@ -355,6 +356,7 @@ All Go microservices are compiled using a single, unified multi-target Dockerfil
 - **`website/`**: Shared package implementing HTTP handlers, templates, routing, vulnerability search logic, and the in-memory cached linter findings index/query engine for the Go website frontend.
 - **`worker/`**: Core engine and subscriber logic for the Go worker.
 - **`importer/`**: Core importer engine (Git, REST, and GCS bucket source handling, deletion detection, reconciliation) used by `cmd/importer`.
+- **`urgent/`**: Synchronous urgent-vulnerability fast lane that performs minimal validation, deterministic affected-package inference, local-only enrichment, and a direct atomic database write. See [`go/internal/urgent/README.md`](go/internal/urgent/README.md).
 - **`recoverer/`**: Core engine and handlers for the Go recoverer.
 - **`models/`**: Storage-agnostic domain types and store interfaces. Code should depend on these, not on a concrete database package.
 - **`gcs/`**: GCS helpers (fast parallel bucket listing) and GCS-backed linter/triage result stores.

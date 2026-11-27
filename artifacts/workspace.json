@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid43098",
+  "B": "/home/dev/feedback/uid43098",
+  "sha": "bfafe4d626ba481538e77fe0d555303c60b2b4da",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "google",
+    "repo": "osv.dev",
+    "sha": "bfafe4d626ba481538e77fe0d555303c60b2b4da"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "osv.dev",
+    "cloneUrl": "https://github.com/Rrr119/osv.dev.git"
+  },
+  "at": "2026-11-27T03:18:18.688Z"
+}

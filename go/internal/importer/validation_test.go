@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/osv.dev/go/internal/urgent"
 	"github.com/google/osv.dev/go/testutils"
 )
 
@@ -113,6 +114,51 @@ func TestImporterWorker_NonStrictResilience(t *testing.T) {
 
 	if len(mockPublisher.Messages) != 1 {
 		t.Errorf("Expected message to be published (ignoring unknown field), but got %d", len(mockPublisher.Messages))
+	}
+}
+
+func TestImporterWorker_UrgentSkipsValidationAndWritesDirectly(t *testing.T) {
+	mockPublisher := &testutils.MockPublisher{}
+	store := &mockVulnerabilityStore{}
+	config := Config{
+		Publisher:          mockPublisher,
+		VulnerabilityStore: store,
+		StrictValidation:   true,
+		UrgentProcessor:    urgent.NewProcessor(store, &mockSourceRepositoryStore{}),
+	}
+
+	// This record deliberately fails the full JSON schema (unknown top-level
+	// field), but the urgent marker must bypass that batch validation step.
+	data := `{
+		"id": "URGENT-2026-001",
+		"modified": "2026-11-27T00:00:00Z",
+		"unknown_field": "fast lane",
+		"database_specific": {"urgent": true},
+		"affected": [{"package": {"purl": "pkg:pypi/widget@1.0.0"}}]
+	}`
+
+	ch := make(chan WorkItem, 1)
+	ch <- WorkItem{
+		Context:          t.Context(),
+		SourceRecord:     mockSourceRecord{DataToRead: []byte(data)},
+		SourceRepository: "urgent-feed",
+		SourcePath:       "URGENT-2026-001.json",
+		Strict:           true,
+		Format:           RecordFormatJSON,
+	}
+	close(ch)
+
+	importerWorker(t.Context(), ch, config)
+
+	if len(mockPublisher.Messages) != 0 {
+		t.Fatalf("published %d messages, want 0 (urgent records bypass Pub/Sub)", len(mockPublisher.Messages))
+	}
+	if len(store.Writes) != 1 {
+		t.Fatalf("direct writes = %d, want 1", len(store.Writes))
+	}
+	pkg := store.Writes[0].Enriched.GetAffected()[0].GetPackage()
+	if pkg.GetEcosystem() != "PyPI" || pkg.GetName() != "widget" {
+		t.Fatalf("inferred package = %s/%s, want PyPI/widget", pkg.GetEcosystem(), pkg.GetName())
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/google/osv.dev/go/internal/gitter"
 	"github.com/google/osv.dev/go/internal/models"
 	"github.com/google/osv.dev/go/internal/osvutil/schema"
+	"github.com/google/osv.dev/go/internal/urgent"
 	"github.com/google/osv.dev/go/internal/worker/taskmsg"
 	"github.com/google/osv.dev/go/logger"
 	"github.com/google/osv.dev/go/osv/clients"
@@ -46,6 +47,7 @@ type Config struct {
 	GCSProvider        clients.CloudStorageProvider
 	HTTPClient         *http.Client
 	GitterClient       gitter.Client
+	UrgentProcessor    *urgent.Processor
 
 	StrictValidation       bool
 	DeleteThreshold        float64
@@ -685,7 +687,8 @@ func processUpdate(ctx context.Context, config Config, item WorkItem) {
 		}
 		data = schema.ReplaceJSONNullEscapes(data)
 
-		if strict {
+		isUrgent := urgent.IsUrgentJSON(data)
+		if strict && !isUrgent {
 			if err := schema.Validate(data); err != nil {
 				logger.ErrorContext(ctx, "JSON schema validation failed",
 					slog.Any("error", err),
@@ -696,6 +699,9 @@ func processUpdate(ctx context.Context, config Config, item WorkItem) {
 			}
 		}
 
+		if isUrgent {
+			unmarshalOptions.DiscardUnknown = true
+		}
 		if err := unmarshalOptions.Unmarshal(data, &vulnProto); err != nil {
 			logger.ErrorContext(ctx, "Failed to unmarshal OSV proto",
 				slog.Any("error", err),
@@ -714,6 +720,30 @@ func processUpdate(ctx context.Context, config Config, item WorkItem) {
 
 	if !isValidID(vulnProto.GetId()) || !hasValidPrefix(vulnProto.GetId(), item.IDPrefixes) {
 		logger.ErrorContext(ctx, "Invalid vulnerability id",
+			slog.String("source", sourceRepoName),
+			slog.String("path", sourcePath),
+			slog.String("id", vulnProto.GetId()))
+
+		return
+	}
+
+	if urgent.IsUrgent(&vulnProto) && config.UrgentProcessor != nil && !config.DryRun {
+		if _, err := config.UrgentProcessor.Ingest(ctx, urgent.Submission{
+			Source:     sourceRepoName,
+			Path:       sourcePath,
+			Raw:        &vulnProto,
+			RawJSON:    data,
+			ReceivedAt: time.Now(),
+		}); err != nil {
+			logger.ErrorContext(ctx, "Failed to fast-lane urgent vulnerability",
+				slog.Any("error", err),
+				slog.String("source", sourceRepoName),
+				slog.String("path", sourcePath),
+				slog.String("id", vulnProto.GetId()))
+
+			return
+		}
+		logger.InfoContext(ctx, "Fast-laned urgent vulnerability",
 			slog.String("source", sourceRepoName),
 			slog.String("path", sourcePath),
 			slog.String("id", vulnProto.GetId()))
